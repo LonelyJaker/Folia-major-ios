@@ -1,0 +1,206 @@
+name: Build iOS IPA (Online Sources Edition)
+
+on:
+  push:
+    branches: [ main, master ]
+    paths:
+      - '.github/workflows/ios-ipa-build.yml'
+  workflow_dispatch:
+    inputs:
+      netease_api_base:
+        description: '默认网易云 API 地址 (VITE_NETEASE_API_BASE，留空可在应用内动态设置)'
+        required: false
+        default: ''
+      qq_api_base:
+        description: '默认 QQ 音乐 API 地址 (VITE_QQ_API_BASE，例如 https://your-domain.vercel.app/api/qq)'
+        required: false
+        default: ''
+      kugou_api_base:
+        description: '默认酷狗音乐 API 地址 (VITE_KUGOU_API_BASE)'
+        required: false
+        default: ''
+
+jobs:
+  build-ios-ipa:
+    runs-on: macos-15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+
+      - name: Apply iOS Online Sources Runtime Patch & Capacitor Config
+        run: |
+          node << 'NODE_SCRIPT'
+          const fs = require('fs');
+
+          // 1. Ensure capacitor.config.ts exists
+          if (!fs.existsSync('capacitor.config.ts')) {
+            fs.writeFileSync('capacitor.config.ts', `import type { CapacitorConfig } from '@capacitor/cli';
+          const config: CapacitorConfig = {
+            appId: 'top.izuna.foliamajor.ios',
+            appName: 'Folia',
+            webDir: 'dist',
+            bundledWebRuntime: false,
+            ios: {
+              contentInset: 'never',
+              allowsLinkPreview: false,
+              scrollEnabled: false,
+              backgroundColor: '#09090b',
+              preferredContentMode: 'mobile',
+            },
+            server: {
+              iosScheme: 'capacitor',
+              allowNavigation: ['*']
+            }
+          };
+          export default config;\n`);
+          }
+
+          // 2. Patch index.html for iOS viewport-fit=cover
+          if (fs.existsSync('index.html')) {
+            let html = fs.readFileSync('index.html', 'utf8');
+            if (!html.includes('viewport-fit=cover')) {
+              html = html.replace(
+                'content="width=device-width, initial-scale=1.0"',
+                'content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"'
+              );
+              fs.writeFileSync('index.html', html);
+            }
+          }
+
+          // 3. Patch public/runtime-config.js for URL & localStorage dynamic API bases
+          if (fs.existsSync('public/runtime-config.js')) {
+            fs.writeFileSync('public/runtime-config.js', `(function () {
+              window.__FOLIA_RUNTIME_CONFIG__ = window.__FOLIA_RUNTIME_CONFIG__ || {};
+              try {
+                var params = new URLSearchParams(window.location.search);
+                [
+                  ['neteaseApiBase', 'folia_ios_netease_api_base', 'neteaseApi'],
+                  ['qqApiBase', 'folia_ios_qq_api_base', 'qqApi'],
+                  ['kugouApiBase', 'folia_ios_kugou_api_base', 'kugouApi'],
+                  ['lyricProxyBase', 'folia_ios_lyric_proxy_base', 'lyricProxy']
+                ].forEach(function (item) {
+                  var fromUrl = params.get(item[2]);
+                  if (fromUrl) localStorage.setItem(item[1], fromUrl.replace(/\\/$/, ''));
+                  var stored = localStorage.getItem(item[1]);
+                  if (stored && !window.__FOLIA_RUNTIME_CONFIG__[item[0]]) {
+                    window.__FOLIA_RUNTIME_CONFIG__[item[0]] = stored.replace(/\\/$/, '');
+                  }
+                });
+              } catch (e) {}
+            })();\n`);
+          }
+
+          // 4. Patch NetEase, QQ, Kugou & LyricProxy to read localStorage / runtime-config on iOS
+          const neteaseFile = 'src/services/onlineMusic/netease/netease.ts';
+          if (fs.existsSync(neteaseFile)) {
+            let s = fs.readFileSync(neteaseFile, 'utf8');
+            if (!s.includes('folia_ios_netease_api_base')) {
+              s = s.replace(
+                'const getConfiguredApiBase = () => {',
+                `const getConfiguredApiBase = () => {
+                  if (typeof window !== 'undefined') {
+                    try {
+                      const ls = window.localStorage?.getItem('folia_ios_netease_api_base')?.trim();
+                      if (ls) return ls.replace(/\\/$/, '');
+                    } catch {}
+                    const rt = (window as any).__FOLIA_RUNTIME_CONFIG__?.neteaseApiBase;
+                    if (typeof rt === 'string' && rt.trim()) return rt.trim().replace(/\\/$/, '');
+                  }`
+              );
+              fs.writeFileSync(neteaseFile, s);
+            }
+          }
+
+          const qqFile = 'src/services/onlineMusic/qq/qqTransport.ts';
+          if (fs.existsSync(qqFile)) {
+            let s = fs.readFileSync(qqFile, 'utf8');
+            if (!s.includes('folia_ios_qq_api_base')) {
+              s = s.replace(
+                'const getWebApiBase = (): string => {',
+                `const getWebApiBase = (): string => {
+                  if (typeof window !== 'undefined') {
+                    try {
+                      const ls = window.localStorage?.getItem('folia_ios_qq_api_base')?.trim();
+                      if (ls) return ls.replace(/\\/$/, '');
+                    } catch {}
+                    const rt = (window as any).__FOLIA_RUNTIME_CONFIG__?.qqApiBase;
+                    if (typeof rt === 'string' && rt.trim()) return rt.trim().replace(/\\/$/, '');
+                  }`
+              );
+              fs.writeFileSync(qqFile, s);
+            }
+          }
+
+          const kugouFile = 'src/services/onlineMusic/kugou/kugouTransport.ts';
+          if (fs.existsSync(kugouFile)) {
+            let s = fs.readFileSync(kugouFile, 'utf8');
+            if (!s.includes('folia_ios_kugou_api_base')) {
+              s = s.replace(
+                'const getWebApiBase = (): string => {',
+                `const getWebApiBase = (): string => {
+                  if (typeof window !== 'undefined') {
+                    try {
+                      const ls = window.localStorage?.getItem('folia_ios_kugou_api_base')?.trim();
+                      if (ls) return ls.replace(/\\/$/, '');
+                    } catch {}
+                    const rt = (window as any).__FOLIA_RUNTIME_CONFIG__?.kugouApiBase;
+                    if (typeof rt === 'string' && rt.trim()) return rt.trim().replace(/\\/$/, '');
+                  }`
+              );
+              fs.writeFileSync(kugouFile, s);
+            }
+          }
+          NODE_SCRIPT
+
+      - name: Install Dependencies & Capacitor iOS
+        run: |
+          npm install --legacy-peer-deps
+          npm install -D @capacitor/cli @capacitor/core @capacitor/ios --legacy-peer-deps
+
+      - name: Build Folia Web Bundle for iOS
+        env:
+          VITE_NETEASE_API_BASE: ${{ github.event.inputs.netease_api_base }}
+          VITE_QQ_API_BASE: ${{ github.event.inputs.qq_api_base }}
+          VITE_KUGOU_API_BASE: ${{ github.event.inputs.kugou_api_base }}
+          VITE_SKIP_STARTUP_EXPERIENCE: 'true'
+        run: |
+          npm run build
+
+      - name: Sync Capacitor iOS Project & Patch Info.plist for Background Audio
+        run: |
+          npx cap add ios || true
+          npx cap sync ios
+          PLIST="ios/App/App/Info.plist"
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes array" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :UIBackgroundModes:0 string audio" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$PLIST" || true
+          /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$PLIST" || true
+
+      - name: Build Unsigned Xcode Archive & Package .ipa
+        run: |
+          cd ios/App
+          xcodebuild -project App.xcodeproj \
+            -scheme App \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            clean build
+          mkdir -p Payload
+          cp -r build/Build/Products/Release-iphoneos/App.app Payload/
+          zip -r ../../Folia-iOS-Unsigned.ipa Payload
+
+      - name: Upload Folia-iOS-Unsigned.ipa Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Folia-iOS-Unsigned-IPA
+          path: Folia-iOS-Unsigned.ipa
+          retention-days: 30
